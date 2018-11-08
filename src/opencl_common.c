@@ -20,6 +20,7 @@
 #define _DEFAULT_SOURCE 1       // setenv()
 #define NEED_OS_TIMER
 #define NEED_OS_FLOCK
+#define NEED_OS_FORK
 #include "os.h"
 
 #include <assert.h>
@@ -1123,12 +1124,20 @@ static char *include_source(char *pathname, int sequential_id, char *opts)
 	return include;
 }
 
+#define KLUDGE_LOCK_FILE "/tmp/.JtR_kernel_build_lock"
+
 void opencl_build(int sequential_id, char *opts, int save, char *file_name, cl_program *program, char *kernel_source_file, char *kernel_source)
 {
 	cl_int build_code, err_code;
 	char *build_log, *build_opts;
 	size_t log_size;
 	const char *srcptr[] = { kernel_source };
+#if (HAVE_MPI || OS_FORK) && (OS_FLOCK || FCNTL_LOCKS)
+	FILE *kludge_file = fopen(KLUDGE_LOCK_FILE, "w");
+#endif
+#if HAVE_MPI
+	static int once;
+#endif
 
 	/* This over-rides binary caching */
 	if (getenv("DUMP_BINARY")) {
@@ -1152,6 +1161,34 @@ void opencl_build(int sequential_id, char *opts, int save, char *file_name, cl_p
 	if (options.verbosity > VERB_LEGACY)
 		fprintf(stderr, "Options used: %s %s\n", build_opts, kernel_source_file);
 
+#if (HAVE_MPI || OS_FORK) && (OS_FLOCK || FCNTL_LOCKS)
+	if (kludge_file == NULL)
+		fprintf(stderr, "%u: Error setting build lock: %s\n",
+#if HAVE_MPI
+		        mpi_p > 1 ? mpi_id + 1 : options.node_min,
+#else
+		        options.node_min,
+#endif
+		        strerror(errno));
+	else {
+#if FCNTL_LOCKS
+		struct flock lock;
+
+		memset(&lock, 0, sizeof(lock));
+		lock.l_type = F_WRLCK;
+		while (fcntl(fileno(kludge_file), F_SETLKW, &lock)) {
+			if (errno != EINTR)
+				pexit("fcntl(F_WRLCK)");
+		}
+#else
+		while (flock(fileno(kludge_file), LOCK_EX)) {
+			if (errno != EINTR)
+				pexit("flock(LOCK_EX)");
+		}
+#endif
+	}
+#endif /* (HAVE_MPI || OS_FORK) && (OS_FLOCK || FCNTL_LOCKS) */
+
 	build_code = clBuildProgram(*program, 0, NULL,
 	                            build_opts, NULL, NULL);
 
@@ -1172,9 +1209,15 @@ void opencl_build(int sequential_id, char *opts, int save, char *file_name, cl_p
 		if (options.verbosity <= VERB_LEGACY)
 			fprintf(stderr, "Options used: %s %s\n", build_opts, kernel_source_file);
 		fprintf(stderr, "Build log: %s\n", build_log);
-		fprintf(stderr, "Error %d building kernel %s. DEVICE_INFO=%d\n",
+		fprintf(stderr, "%u: Error %d building kernel %s. DEVICE_INFO=%d\n",
+#if HAVE_MPI
+		        mpi_p > 1 ? mpi_id + 1 : options.node_min,
+#else
+		        options.node_min,
+#endif
 		        build_code, kernel_source_file, device_info[sequential_id]);
 		HANDLE_CLERROR(build_code, "clBuildProgram failed.");
+		pexit("kernel build");
 	}
 	// Nvidia may return a single '\n' that we ignore
 	else if (options.verbosity >= LOG_VERB && strlen(build_log) > 1)
@@ -1231,6 +1274,19 @@ void opencl_build(int sequential_id, char *opts, int save, char *file_name, cl_p
 		}
 		MEM_FREE(source);
 	}
+
+#if (HAVE_MPI || OS_FORK) && (OS_FLOCK || FCNTL_LOCKS)
+	fclose(kludge_file);
+#endif /* (HAVE_MPI || OS_FORK) && (OS_FLOCK || FCNTL_LOCKS) */
+
+#if HAVE_MPI
+	if (mpi_p > 1 && !once++) {
+		// Avoid silly race conditions seen with nvidia
+		MPI_Barrier(MPI_COMM_WORLD);
+		if (mpi_id == 0 && options.verbosity > VERB_DEFAULT)
+			fprintf(stderr, "All nodes done OpenCL build\n");
+	}
+#endif
 }
 
 void opencl_build_from_binary(int sequential_id, cl_program *program, char *kernel_source, size_t program_size)
@@ -2125,6 +2181,9 @@ void opencl_build_kernel(char *kernel_filename, int sequential_id, char *opts,
 int opencl_prepare_dev(int sequential_id)
 {
 	int err_type = 0;
+#ifdef HAVE_MPI
+	static int once;
+#endif
 
 	opencl_preinit();
 
@@ -2135,6 +2194,15 @@ int opencl_prepare_dev(int sequential_id)
 	if (!context[sequential_id])
 		start_opencl_device(sequential_id, &err_type);
 	dev_init(sequential_id);
+
+#if HAVE_MPI
+	if (mpi_p > 1 && !once++) {
+		// Avoid silly race conditions seen with nvidia
+		MPI_Barrier(MPI_COMM_WORLD);
+		if (mpi_id == 0 && options.verbosity > VERB_DEFAULT)
+			fprintf(stderr, "All nodes done OpenCL prepare\n");
+	}
+#endif
 
 	return sequential_id;
 }
