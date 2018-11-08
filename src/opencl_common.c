@@ -16,6 +16,9 @@
 
 #ifdef HAVE_OPENCL
 
+#define RACE_CONDITION_DEBUG 1
+#define KLUDGE_LOCK_FILE "/tmp/.JtR_kernel_build_lock"
+
 #define _BSD_SOURCE 1           // setenv()
 #define _DEFAULT_SOURCE 1       // setenv()
 #define NEED_OS_TIMER
@@ -34,6 +37,7 @@
 #if !AC_BUILT || HAVE_FCNTL_H
 #include <fcntl.h>
 #endif
+#include <unistd.h>
 
 // the 2 DJ_DOS builds currently set this (and do not build the header). If other environs
 // can not build the header, then they will also have this value set.
@@ -75,6 +79,12 @@
 #define LOG_VERB VERB_LEGACY
 #else
 #define LOG_VERB VERB_DEFAULT
+#endif
+
+#if HAVE_MPI
+#define NODE (mpi_p > 1 ? mpi_id + 1 : options.node_min)
+#else
+#define NODE options.node_min
 #endif
 
 /* Common OpenCL variables */
@@ -440,6 +450,7 @@ static void start_opencl_environment()
 	char opencl_data[LOG_SIZE];
 	cl_uint num_platforms, device_num, device_pos = 0;
 	int i, ret;
+	int retry = 0;
 
 	/* Find OpenCL enabled devices. We ignore error here, in case
 	 * there is no platform and we'd like to run a non-OpenCL format. */
@@ -448,9 +459,20 @@ static void start_opencl_environment()
 	for (i = 0; i < num_platforms; i++) {
 		platforms[i].platform = platform_list[i];
 
-		HANDLE_CLERROR(clGetPlatformInfo(platforms[i].platform,
-		                                 CL_PLATFORM_NAME, sizeof(opencl_data), opencl_data, NULL),
-		               "Error querying PLATFORM_NAME");
+		do {
+			ret = clGetPlatformInfo(platforms[i].platform,
+				CL_PLATFORM_NAME, sizeof(opencl_data), opencl_data, NULL);
+			if (ret != CL_SUCCESS) {
+				fprintf(stderr, "node %u pid %d ppid %u got error %d %s from "
+				        "clGetPlatformInfo(), %s\n",
+				        options.node_min, (int)getpid(), (int)getppid(),
+				        ret, get_error_name(ret),
+				        retry < 10 ? "retrying" : "giving up");
+				if (retry++ >= 10)
+					error();
+				usleep(NODE * 100);
+			}
+		} while (ret != CL_SUCCESS);
 
 		// It is possible to have a platform without any devices
 		ret = clGetDeviceIDs(platforms[i].platform, CL_DEVICE_TYPE_ALL,
@@ -532,6 +554,7 @@ static int start_opencl_device(int sequential_id, int *err_type)
 {
 	cl_context_properties properties[3];
 	char opencl_data[LOG_SIZE];
+	int retry = 0;
 
 	// Get the detailed information about the device
 	// (populate device_info[d] bitfield).
@@ -568,44 +591,51 @@ static int start_opencl_device(int sequential_id, int *err_type)
 
 	max_group_size = get_device_max_lws(sequential_id);
 
-	// Get the platform properties
-	properties[0] = CL_CONTEXT_PLATFORM;
-	properties[1] = (cl_context_properties)
-	                platforms[get_platform_id(sequential_id)].platform;
-	properties[2] = 0;
+	do {
+		// Get the platform properties
+		properties[0] = CL_CONTEXT_PLATFORM;
+		properties[1] = (cl_context_properties)
+			platforms[get_platform_id(sequential_id)].platform;
+		properties[2] = 0;
 
-	// Setup context and queue
-	context[sequential_id] = clCreateContext(properties, 1,
-	                         &devices[sequential_id], NULL, NULL, &ret_code);
-	if (ret_code != CL_SUCCESS) {
-#ifdef OCL_DEBUG
-		fprintf(stderr, "Error creating context for device %d "
-		        "(%d:%d): %s\n", sequential_id,
-		        get_platform_id(sequential_id),
-		        get_device_id(sequential_id), get_error_name(ret_code));
-#endif
-		platforms[get_platform_id(sequential_id)].num_devices--;
-		*err_type = 1;
-		return 0;
-	}
-	queue[sequential_id] = clCreateCommandQueue(context[sequential_id],
-	                       devices[sequential_id], 0, &ret_code);
-	if (ret_code != CL_SUCCESS) {
-#ifdef OCL_DEBUG
-		fprintf(stderr, "Error creating command queue for "
-		        "device %d (%d:%d): %s\n", sequential_id,
-		        get_platform_id(sequential_id),
-		        get_device_id(sequential_id), get_error_name(ret_code));
-#endif
-		platforms[get_platform_id(sequential_id)].num_devices--;
-		HANDLE_CLERROR(clReleaseContext(context[sequential_id]),
-		               "Release Context");
-		*err_type = 2;
-		return 0;
-	}
+		// Setup context and queue
+		context[sequential_id] = clCreateContext(properties, 1,
+			&devices[sequential_id], NULL, NULL, &ret_code);
+
+		if (ret_code != CL_SUCCESS) {
+			fprintf(stderr, "%u: Error creating context for device %d "
+			        "(%d:%d): %s, %s\n",
+			        NODE, sequential_id,
+			        get_platform_id(sequential_id),
+			        get_device_id(sequential_id), get_error_name(ret_code),
+			        retry < 10 ? "retrying" : "giving up");
+			if (retry++ >= 10)
+				error();
+			usleep(NODE * 100);
+		}
+	} while (ret_code != CL_SUCCESS);
+
+	retry = 0;
+	do {
+		queue[sequential_id] = clCreateCommandQueue(context[sequential_id],
+		                       devices[sequential_id], 0, &ret_code);
+
+		if (ret_code != CL_SUCCESS) {
+			fprintf(stderr, "%u: Error creating command queue for "
+			        "device %d (%d:%d): %s, %s\n", NODE,
+			        sequential_id, get_platform_id(sequential_id),
+			        get_device_id(sequential_id), get_error_name(ret_code),
+			        retry < 10 ? "retrying" : "giving up");
+			if (retry++ >= 10)
+				error();
+			usleep(NODE * 100);
+		}
+	} while (ret_code != CL_SUCCESS);
+
 #ifdef OCL_DEBUG
 	fprintf(stderr, "  Device %d: %s\n", sequential_id, opencl_data);
 #endif
+
 	// Success.
 	return 1;
 }
@@ -1124,8 +1154,6 @@ static char *include_source(char *pathname, int sequential_id, char *opts)
 	return include;
 }
 
-#define KLUDGE_LOCK_FILE "/tmp/.JtR_kernel_build_lock"
-
 void opencl_build(int sequential_id, char *opts, int save, char *file_name, cl_program *program, char *kernel_source_file, char *kernel_source)
 {
 	cl_int build_code, err_code;
@@ -1164,12 +1192,7 @@ void opencl_build(int sequential_id, char *opts, int save, char *file_name, cl_p
 #if (HAVE_MPI || OS_FORK) && (OS_FLOCK || FCNTL_LOCKS)
 	if (kludge_file == NULL)
 		fprintf(stderr, "%u: Error setting build lock: %s\n",
-#if HAVE_MPI
-		        mpi_p > 1 ? mpi_id + 1 : options.node_min,
-#else
-		        options.node_min,
-#endif
-		        strerror(errno));
+		        NODE, strerror(errno));
 	else {
 #if FCNTL_LOCKS
 		struct flock lock;
@@ -1187,6 +1210,10 @@ void opencl_build(int sequential_id, char *opts, int save, char *file_name, cl_p
 		}
 #endif
 	}
+#if RACE_CONDITION_DEBUG
+	if (options.verbosity == VERB_MAX)
+		fprintf(stderr, "Node %d got a lock\n", NODE);
+#endif
 #endif /* (HAVE_MPI || OS_FORK) && (OS_FLOCK || FCNTL_LOCKS) */
 
 	build_code = clBuildProgram(*program, 0, NULL,
@@ -1210,14 +1237,10 @@ void opencl_build(int sequential_id, char *opts, int save, char *file_name, cl_p
 			fprintf(stderr, "Options used: %s %s\n", build_opts, kernel_source_file);
 		fprintf(stderr, "Build log: %s\n", build_log);
 		fprintf(stderr, "%u: Error %d building kernel %s. DEVICE_INFO=%d\n",
-#if HAVE_MPI
-		        mpi_p > 1 ? mpi_id + 1 : options.node_min,
-#else
-		        options.node_min,
-#endif
-		        build_code, kernel_source_file, device_info[sequential_id]);
+		        NODE, build_code, kernel_source_file,
+		        device_info[sequential_id]);
 		HANDLE_CLERROR(build_code, "clBuildProgram failed.");
-		pexit("kernel build");
+		error_msg("kernel build");
 	}
 	// Nvidia may return a single '\n' that we ignore
 	else if (options.verbosity >= LOG_VERB && strlen(build_log) > 1)
@@ -1276,13 +1299,25 @@ void opencl_build(int sequential_id, char *opts, int save, char *file_name, cl_p
 	}
 
 #if (HAVE_MPI || OS_FORK) && (OS_FLOCK || FCNTL_LOCKS)
+#if RACE_CONDITION_DEBUG
+	if (options.verbosity == VERB_MAX)
+		fprintf(stderr, "Node %d releasing lock\n", NODE);
+#endif
 	fclose(kludge_file);
 #endif /* (HAVE_MPI || OS_FORK) && (OS_FLOCK || FCNTL_LOCKS) */
 
 #if HAVE_MPI
 	if (mpi_p > 1 && !once++) {
 		// Avoid silly race conditions seen with nvidia
+#if RACE_CONDITION_DEBUG
+		if (options.verbosity == VERB_MAX)
+			fprintf(stderr, "Node %d reached MPI build barrier\n", NODE);
+#endif
 		MPI_Barrier(MPI_COMM_WORLD);
+#if RACE_CONDITION_DEBUG
+		if (options.verbosity == VERB_MAX)
+			fprintf(stderr, "Node %d passed MPI build barrier\n", NODE);
+#endif
 		if (mpi_id == 0 && options.verbosity > VERB_DEFAULT)
 			fprintf(stderr, "All nodes done OpenCL build\n");
 	}
@@ -2198,7 +2233,15 @@ int opencl_prepare_dev(int sequential_id)
 #if HAVE_MPI
 	if (mpi_p > 1 && !once++) {
 		// Avoid silly race conditions seen with nvidia
+#if RACE_CONDITION_DEBUG
+		if (options.verbosity == VERB_MAX)
+			fprintf(stderr, "Node %d reached MPI prep barrier\n", NODE);
+#endif
 		MPI_Barrier(MPI_COMM_WORLD);
+#if RACE_CONDITION_DEBUG
+		if (options.verbosity == VERB_MAX)
+			fprintf(stderr, "Node %d passed MPI prep barrier\n", NODE);
+#endif
 		if (mpi_id == 0 && options.verbosity > VERB_DEFAULT)
 			fprintf(stderr, "All nodes done OpenCL prepare\n");
 	}
