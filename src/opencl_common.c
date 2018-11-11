@@ -443,16 +443,19 @@ static void start_opencl_environment()
 {
 	cl_platform_id platform_list[MAX_PLATFORMS];
 	char opencl_data[LOG_SIZE];
-	cl_uint num_platforms = 0, device_pos = 0;
-	int i, ret;
+	cl_uint num_platforms, device_pos = 0;
+	int i;
 	int retry = 0;
 
 	/* Find OpenCL enabled devices. We ignore error here, in case
 	 * there is no platform and we'd like to run a non-OpenCL format. */
-	clGetPlatformIDs(MAX_PLATFORMS, platform_list, &num_platforms);
+	if (clGetPlatformIDs(MAX_PLATFORMS,
+			platform_list, &num_platforms) != CL_SUCCESS)
+		num_platforms = 0;
 
 	for (i = 0; i < num_platforms; i++) {
-		cl_uint device_num = 0;
+		int ret;
+		cl_uint device_num;
 
 		platforms[i].platform = platform_list[i];
 
@@ -469,9 +472,11 @@ static void start_opencl_environment()
 			}
 		} while (ret != CL_SUCCESS);
 
-		// It is possible to have a platform without any devices
-		clGetDeviceIDs(platforms[i].platform, CL_DEVICE_TYPE_ALL,
-			MAX_GPU_DEVICES, &devices[device_pos], &device_num);
+		// It is possible to have a platform without any devices, we
+		// ignore error here too on purpose.
+		if (clGetDeviceIDs(platforms[i].platform, CL_DEVICE_TYPE_ALL,
+			MAX_GPU_DEVICES, &devices[device_pos], &device_num) != CL_SUCCESS)
+			device_num = 0;
 
 		if (device_num < 1 && options.verbosity > VERB_LEGACY)
 			fprintf(stderr, "No OpenCL devices found on platform #%d\n", i);
@@ -487,6 +492,7 @@ static void start_opencl_environment()
 		        i, opencl_data, device_num);
 #endif
 	}
+
 	// Set NULL to the final buffer position.
 	platforms[i].platform = NULL;
 	devices[device_pos] = NULL;
