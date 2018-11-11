@@ -465,10 +465,10 @@ static void start_opencl_environment()
 			if (ret != CL_SUCCESS) {
 				fprintf(stderr, "%u: Error %d %s from clGetPlatformInfo, %s\n",
 				        NODE, ret, get_error_name(ret),
-				        retry < 10 ? "retrying" : "giving up");
-				if (++retry >= 10)
+				        retry < 9 ? "retrying" : "giving up");
+				if (++retry > 9)
 					error();
-				usleep(NODE * 100);
+				usleep((retry + NODE) * 100);
 			}
 		} while (ret != CL_SUCCESS);
 
@@ -606,10 +606,10 @@ static int start_opencl_device(int sequential_id, int *err_type)
 			        NODE, sequential_id,
 			        get_platform_id(sequential_id),
 			        get_device_id(sequential_id), get_error_name(ret_code),
-			        retry < 10 ? "retrying" : "giving up");
-			if (++retry >= 10)
+			        retry < 9 ? "retrying" : "giving up");
+			if (++retry > 9)
 				error();
-			usleep(NODE * 100);
+			usleep((retry + NODE) * 100);
 		}
 	} while (ret_code != CL_SUCCESS);
 
@@ -623,10 +623,10 @@ static int start_opencl_device(int sequential_id, int *err_type)
 			        "device %d (%d:%d): %s, %s\n", NODE,
 			        sequential_id, get_platform_id(sequential_id),
 			        get_device_id(sequential_id), get_error_name(ret_code),
-			        retry < 10 ? "retrying" : "giving up");
-			if (++retry >= 10)
+			        retry < 9 ? "retrying" : "giving up");
+			if (++retry > 9)
 				error();
-			usleep(NODE * 100);
+			usleep((retry + NODE) * 100);
 		}
 	} while (ret_code != CL_SUCCESS);
 
