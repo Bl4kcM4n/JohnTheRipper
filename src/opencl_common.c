@@ -81,12 +81,6 @@
 #define LOG_VERB VERB_DEFAULT
 #endif
 
-#if HAVE_MPI
-#define NODE (mpi_p > 1 ? mpi_id + 1 : options.node_min)
-#else
-#define NODE options.node_min
-#endif
-
 /* Common OpenCL variables */
 int platform_id;
 int default_gpu_selected;
@@ -256,8 +250,8 @@ void opencl_driver_value(int sequential_id, int *major, int *minor)
 
 	*major = 0, *minor = 0;
 
-	clGetDeviceInfo(devices[sequential_id], CL_DRIVER_VERSION,
-	                sizeof(dname), dname, NULL);
+	HANDLE_CLERROR(clGetDeviceInfo(devices[sequential_id], CL_DRIVER_VERSION,
+		sizeof(dname), dname, NULL), "Error querying driver version");
 
 	p = dname;
 	while (*p && !isdigit((int)*p))
@@ -310,8 +304,9 @@ static char *opencl_driver_info(int sequential_id)
 	struct cfg_list *list;
 	struct cfg_line *line;
 
-	clGetDeviceInfo(devices[sequential_id], CL_DRIVER_VERSION,
-	                sizeof(dname), dname, NULL);
+	HANDLE_CLERROR(clGetDeviceInfo(devices[sequential_id], CL_DRIVER_VERSION,
+		sizeof(dname), dname, NULL), "Error querying driver version");
+
 	opencl_driver_value(sequential_id, &major, &minor);
 	name = buf;
 
@@ -463,8 +458,7 @@ static void start_opencl_environment()
 			ret = clGetPlatformInfo(platforms[i].platform, CL_PLATFORM_NAME,
 				sizeof(opencl_data), opencl_data, NULL);
 			if (ret != CL_SUCCESS) {
-				fprintf(stderr, "Node %u got error %d %s from "
-				        "clGetPlatformInfo(), %s\n",
+				fprintf(stderr, "%u: Error %d %s from clGetPlatformInfo, %s\n",
 				        NODE, ret, get_error_name(ret),
 				        retry < 10 ? "retrying" : "giving up");
 				if (++retry >= 10)
@@ -506,19 +500,18 @@ static cl_int get_pci_info(int sequential_id, hw_bus *hardware_info)
 	hardware_info->function = -1;
 	memset(hardware_info->busId, '\0', sizeof(hardware_info->busId));
 
-	if (gpu_amd(device_info[sequential_id]) || cpu(device_info[sequential_id])) {
+	if (gpu_amd(device_info[sequential_id]) ||
+	    cpu_amd(device_info[sequential_id])) {
 		cl_device_topology_amd topo;
 
 		ret = clGetDeviceInfo(devices[sequential_id],
-		                      CL_DEVICE_TOPOLOGY_AMD, sizeof(topo), &topo, NULL);
+			CL_DEVICE_TOPOLOGY_AMD, sizeof(topo), &topo, NULL);
 
 		if (ret == CL_SUCCESS) {
 			hardware_info->bus = topo.pcie.bus & 0xff;
 			hardware_info->device = topo.pcie.device & 0xff;
 			hardware_info->function = topo.pcie.function & 0xff;
-		} else if (cpu_intel(device_info[sequential_id]))
-			return CL_SUCCESS;
-		else
+		} else
 			return ret;
 	} else if (gpu_nvidia(device_info[sequential_id])) {
 		cl_uint entries;
@@ -537,10 +530,10 @@ static cl_int get_pci_info(int sequential_id, hw_bus *hardware_info)
 		if (ret == CL_SUCCESS) {
 			hardware_info->device = entries >> 3;
 			hardware_info->function = entries & 7;
-
 		} else
 			return ret;
-	}
+	} else
+		return CL_SUCCESS;
 
 	sprintf(hardware_info->busId, "%02x:%02x.%x", hardware_info->bus,
 	        hardware_info->device, hardware_info->function);
@@ -668,23 +661,30 @@ static void add_device_to_list(int sequential_id)
 static void add_device_type(cl_ulong device_type)
 {
 	int i, j, sequence_nr = 0;
-	cl_uint device_num;
-	cl_ulong long_entries;
-	cl_device_id devices[MAX_GPU_DEVICES];
+	int found = 0;
 
+	// Get all devices of requested type.
 	for (i = 0; platforms[i].platform; i++) {
-		// Get all devices of informed type.
-		HANDLE_CLERROR(clGetDeviceIDs(platforms[i].platform,
-		                              CL_DEVICE_TYPE_ALL, MAX_GPU_DEVICES, devices, &device_num),
-		               "No OpenCL device of that type exist");
+		cl_device_id devices[MAX_GPU_DEVICES];
+		cl_uint device_num = 0;
 
-		for (j = 0; j < device_num; j++, sequence_nr++) {
-			clGetDeviceInfo(devices[j], CL_DEVICE_TYPE,
-			                sizeof(cl_ulong), &long_entries, NULL);
-			if (long_entries & device_type)
-				add_device_to_list(sequence_nr);
+		if (clGetDeviceIDs(platforms[i].platform, CL_DEVICE_TYPE_ALL,
+				MAX_GPU_DEVICES, devices, &device_num) == CL_SUCCESS) {
+			for (j = 0; j < device_num; j++, sequence_nr++) {
+				cl_ulong long_entries = 0;
+
+				if (clGetDeviceInfo(devices[j], CL_DEVICE_TYPE,
+						sizeof(cl_ulong), &long_entries, NULL) == CL_SUCCESS) {
+					if (long_entries & device_type) {
+						found++;
+						add_device_to_list(sequence_nr);
+					}
+				}
+			}
 		}
 	}
+	if (!found)
+		error_msg("No OpenCL device of that type found\n");
 }
 
 static void build_device_list(char *device_list[MAX_GPU_DEVICES])
@@ -827,26 +827,26 @@ unsigned int opencl_get_vector_width(int sequential_id, int size)
 		switch (size) {
 		case sizeof(cl_char):
 			HANDLE_CLERROR(clGetDeviceInfo(devices[gpu_id],
-			                               CL_DEVICE_PREFERRED_VECTOR_WIDTH_CHAR,
-			                               sizeof(v_width), &v_width, NULL),
+				CL_DEVICE_PREFERRED_VECTOR_WIDTH_CHAR,
+				sizeof(v_width), &v_width, NULL),
 			               "Error asking for char vector width");
 			break;
 		case sizeof(cl_short):
 			HANDLE_CLERROR(clGetDeviceInfo(devices[gpu_id],
-			                               CL_DEVICE_PREFERRED_VECTOR_WIDTH_SHORT,
-			                               sizeof(v_width), &v_width, NULL),
+				CL_DEVICE_PREFERRED_VECTOR_WIDTH_SHORT,
+				sizeof(v_width), &v_width, NULL),
 			               "Error asking for long vector width");
 			break;
 		case sizeof(cl_int):
 			HANDLE_CLERROR(clGetDeviceInfo(devices[gpu_id],
-			                               CL_DEVICE_PREFERRED_VECTOR_WIDTH_INT,
-			                               sizeof(v_width), &v_width, NULL),
+				CL_DEVICE_PREFERRED_VECTOR_WIDTH_INT,
+				sizeof(v_width), &v_width, NULL),
 			               "Error asking for int vector width");
 			break;
 		case sizeof(cl_long):
 			HANDLE_CLERROR(clGetDeviceInfo(devices[gpu_id],
-			                               CL_DEVICE_PREFERRED_VECTOR_WIDTH_LONG,
-			                               sizeof(v_width), &v_width, NULL),
+				CL_DEVICE_PREFERRED_VECTOR_WIDTH_LONG,
+				sizeof(v_width), &v_width, NULL),
 			               "Error asking for long vector width");
 			break;
 		default:
@@ -914,9 +914,8 @@ void opencl_get_user_preferences(char *format)
 	} else
 		fmt_base_name[0] = 0;
 
-	if (format &&
-	        (tmp_value = cfg_get_param(SECTION_OPTIONS, SUBSECTION_OPENCL,
-	                                   opencl_get_config_name(fmt_base_name, LWS_CONFIG_NAME))))
+	if (format && (tmp_value = cfg_get_param(SECTION_OPTIONS, SUBSECTION_OPENCL,
+			opencl_get_config_name(fmt_base_name, LWS_CONFIG_NAME))))
 		local_work_size = atoi(tmp_value);
 
 	if (options.lws)
@@ -924,9 +923,8 @@ void opencl_get_user_preferences(char *format)
 	else if ((tmp_value = getenv("LWS")))
 		local_work_size = atoi(tmp_value);
 
-	if (format &&
-	        (tmp_value = cfg_get_param(SECTION_OPTIONS, SUBSECTION_OPENCL,
-	                                   opencl_get_config_name(fmt_base_name, GWS_CONFIG_NAME))))
+	if (format && (tmp_value = cfg_get_param(SECTION_OPTIONS, SUBSECTION_OPENCL,
+			opencl_get_config_name(fmt_base_name, GWS_CONFIG_NAME))))
 		global_work_size = atoi(tmp_value);
 
 	if (options.gws)
@@ -939,9 +937,8 @@ void opencl_get_user_preferences(char *format)
 		global_work_size = GET_MULTIPLE_OR_ZERO(global_work_size,
 		                                        local_work_size);
 
-	if (format &&
-	        (tmp_value = cfg_get_param(SECTION_OPTIONS, SUBSECTION_OPENCL,
-	                                   opencl_get_config_name(fmt_base_name, DUR_CONFIG_NAME))))
+	if (format && (tmp_value = cfg_get_param(SECTION_OPTIONS, SUBSECTION_OPENCL,
+			opencl_get_config_name(fmt_base_name, DUR_CONFIG_NAME))))
 		duration_time = atoi(tmp_value);
 	else if ((tmp_value = cfg_get_param(SECTION_OPTIONS, SUBSECTION_OPENCL,
 	                                    "Global" DUR_CONFIG_NAME)))
@@ -986,7 +983,7 @@ static void dev_init(int sequential_id)
 	               "Error querying DEVICE_NAME");
 
 	ret_code = clGetDeviceInfo(devices[sequential_id],
-	                           CL_DEVICE_BOARD_NAME_AMD, sizeof(opencl_log), opencl_log, NULL);
+		CL_DEVICE_BOARD_NAME_AMD, sizeof(opencl_log), opencl_log, NULL);
 
 	if (ret_code == CL_SUCCESS && (len = strlen(opencl_log))) {
 		while (len > 0 && isspace(ARCH_INDEX(opencl_log[len - 1])))
@@ -2591,10 +2588,9 @@ int get_device_version(int sequential_id)
 	char dname[MAX_OCLINFO_STRING_LEN];
 	unsigned int major, minor;
 
-	clGetDeviceInfo(devices[sequential_id], CL_DEVICE_VERSION,
-	                MAX_OCLINFO_STRING_LEN, dname, NULL);
-
-	if (sscanf(dname, "OpenCL %u.%u", &major, &minor) == 2)
+	if ((clGetDeviceInfo(devices[sequential_id], CL_DEVICE_VERSION,
+			MAX_OCLINFO_STRING_LEN, dname, NULL) == CL_SUCCESS) &&
+			sscanf(dname, "OpenCL %u.%u", &major, &minor) == 2)
 		return major * 100 + minor * 10;
 
 	return DEV_UNKNOWN;

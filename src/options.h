@@ -187,6 +187,15 @@
 #define FLG_REGEX_STACKED		0x0400000000000000ULL
 
 /*
+ * Macro for getting correct node number regardless of if MPI or not
+ */
+#if HAVE_MPI
+#define NODE (mpi_p > 1 ? mpi_id + 1 : options.node_min)
+#else
+#define NODE options.node_min
+#endif
+
+/*
  * Structure with option flags and all the parameters.
  */
 struct options_main {
