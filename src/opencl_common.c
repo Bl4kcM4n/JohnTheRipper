@@ -448,7 +448,7 @@ static void start_opencl_environment()
 {
 	cl_platform_id platform_list[MAX_PLATFORMS];
 	char opencl_data[LOG_SIZE];
-	cl_uint num_platforms, device_num, device_pos = 0;
+	cl_uint num_platforms = 0, device_num = 0, device_pos = 0;
 	int i, ret;
 	int retry = 0;
 
@@ -460,8 +460,8 @@ static void start_opencl_environment()
 		platforms[i].platform = platform_list[i];
 
 		do {
-			ret = clGetPlatformInfo(platforms[i].platform,
-				CL_PLATFORM_NAME, sizeof(opencl_data), opencl_data, NULL);
+			ret = clGetPlatformInfo(platforms[i].platform, CL_PLATFORM_NAME,
+				sizeof(opencl_data), opencl_data, NULL);
 			if (ret != CL_SUCCESS) {
 				fprintf(stderr, "node %u pid %d ppid %u got error %d %s from "
 				        "clGetPlatformInfo(), %s\n",
@@ -475,13 +475,11 @@ static void start_opencl_environment()
 		} while (ret != CL_SUCCESS);
 
 		// It is possible to have a platform without any devices
-		ret = clGetDeviceIDs(platforms[i].platform, CL_DEVICE_TYPE_ALL,
-		                     MAX_GPU_DEVICES, &devices[device_pos],
-		                     &device_num);
+		clGetDeviceIDs(platforms[i].platform, CL_DEVICE_TYPE_ALL,
+			MAX_GPU_DEVICES, &devices[device_pos], &device_num);
 
-		if ((ret != CL_SUCCESS || device_num < 1) &&
-		        options.verbosity > VERB_LEGACY)
-			fprintf(stderr, "No OpenCL devices was found on platform #%d\n", i);
+		if (device_num < 1 && options.verbosity > VERB_LEGACY)
+			fprintf(stderr, "No OpenCL devices found on platform #%d\n", i);
 
 		// Save platform and devices information
 		platforms[i].num_devices = device_num;
