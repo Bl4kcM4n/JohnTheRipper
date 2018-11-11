@@ -443,7 +443,7 @@ static void start_opencl_environment()
 {
 	cl_platform_id platform_list[MAX_PLATFORMS];
 	char opencl_data[LOG_SIZE];
-	cl_uint num_platforms = 0, device_num = 0, device_pos = 0;
+	cl_uint num_platforms = 0, device_pos = 0;
 	int i, ret;
 	int retry = 0;
 
@@ -452,6 +452,8 @@ static void start_opencl_environment()
 	clGetPlatformIDs(MAX_PLATFORMS, platform_list, &num_platforms);
 
 	for (i = 0; i < num_platforms; i++) {
+		cl_uint device_num = 0;
+
 		platforms[i].platform = platform_list[i];
 
 		do {
