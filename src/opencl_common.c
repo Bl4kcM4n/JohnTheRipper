@@ -463,12 +463,11 @@ static void start_opencl_environment()
 			ret = clGetPlatformInfo(platforms[i].platform, CL_PLATFORM_NAME,
 				sizeof(opencl_data), opencl_data, NULL);
 			if (ret != CL_SUCCESS) {
-				fprintf(stderr, "node %u pid %d ppid %u got error %d %s from "
+				fprintf(stderr, "Node %u got error %d %s from "
 				        "clGetPlatformInfo(), %s\n",
-				        options.node_min, (int)getpid(), (int)getppid(),
-				        ret, get_error_name(ret),
+				        NODE, ret, get_error_name(ret),
 				        retry < 10 ? "retrying" : "giving up");
-				if (retry++ >= 10)
+				if (++retry >= 10)
 					error();
 				usleep(NODE * 100);
 			}
@@ -607,7 +606,7 @@ static int start_opencl_device(int sequential_id, int *err_type)
 			        get_platform_id(sequential_id),
 			        get_device_id(sequential_id), get_error_name(ret_code),
 			        retry < 10 ? "retrying" : "giving up");
-			if (retry++ >= 10)
+			if (++retry >= 10)
 				error();
 			usleep(NODE * 100);
 		}
@@ -624,7 +623,7 @@ static int start_opencl_device(int sequential_id, int *err_type)
 			        sequential_id, get_platform_id(sequential_id),
 			        get_device_id(sequential_id), get_error_name(ret_code),
 			        retry < 10 ? "retrying" : "giving up");
-			if (retry++ >= 10)
+			if (++retry >= 10)
 				error();
 			usleep(NODE * 100);
 		}
